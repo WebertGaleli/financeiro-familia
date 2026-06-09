@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Controle Financeiro Pessoal</title>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, updateDoc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ════════════════════════════════════════════════════════
+  //  🔧 COLE AQUI SUAS CONFIGURAÇÕES DO FIREBASE
+  //     (instruções no guia abaixo do arquivo)
+  // ════════════════════════════════════════════════════════
+  const firebaseConfig = {
+    apiKey:            "AIzaSyDX3NkulJDwWgR2pFZV_65yVHl8O9dwcSE",
+    authDomain:        "financeiro-familia-c349b.firebaseapp.com",
+    projectId:         "financeiro-familia-c349b",
+    storageBucket:     "financeiro-familia-c349b.firebasestorage.app",
+    messagingSenderId: "600054285208",
+    appId:             "1:600054285208:web:edc49cebd10259a97721ed"
+  };
+  // ════════════════════════════════════════════════════════
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+
+  // ── Utilitários ──────────────────────────────────────────
+  function mascaraReais(v) {
+    const n = v.replace(/\D/g,"");
+    if (!n) return "";
+    return (parseInt(n,10)/100).toLocaleString("pt-BR",{style:"currency",currency:"BRL"});
+  }
+  function parseMoeda(s) {
+    return parseFloat((s||"").replace(/[R$\s.]/g,"").replace(",",".")) || 0;
+  }
+  function fmtR(v) { return Number(v).toLocaleString("pt-BR",{style:"currency",currency:"BRL"}); }
+  function semana(d) { return `Sem ${Math.ceil(new Date(d+"T00:00:00").getDate()/7)}`; }
+
+  // ── Estado global ────────────────────────────────────────
+  let lancamentos   = [];
+  let tiposDespesa  = ["Alimentação","Moradia","Transporte","Saúde","Educação","Lazer","Outros"];
+  let tiposReceita  = ["Salário","Freelance","Outros"];
+  let metas         = {Alimentação:800,Moradia:1500,Transporte:400,Lazer:300};
+  let mesAtual      = new Date().getMonth();
+  let anoAtual      = new Date().getFullYear();
+  let filtroTipo    = "Todos";
+  let filtroCat     = "Todas";
+  let editandoId    = null;
+
+  // ── Firestore: escutar lançamentos em tempo real ─────────
+  onSnapshot(collection(db,"lancamentos"), snap => {
+    lancamentos = snap.docs.map(d=>({id:d.id,...d.data()}));
+    renderTudo();
+  });
+
+  // ── Firestore: carregar e salvar configurações ───────────
+  async function carregarConfig() {
+    const snap = await getDoc(doc(db,"config","dados"));
+    if (snap.exists()) {
+      const d = snap.data();
+      if (d.tiposDespesa)  tiposDespesa = d.tiposDespesa;
+      if (d.tiposReceita)  tiposReceita = d.tiposReceita;
+      if (d.metas)         metas        = d.metas;
+    }
+    renderTudo();
+  }
+  async function salvarConfig() {
+    await setDoc(doc(db,"config","dados"),{tiposDespesa,tiposReceita,metas});
+  }
+  carregarConfig();
+
+  // ── CRUD Firestore ───────────────────────────────────────
+  async function adicionarLancamento(item) {
+    showLoader(true);
+    await addDoc(collection(db,"lancamentos"), item);
+    showLoader(false);
+  }
+  async function excluirLancamento(id) {
+    if (!confirm("Excluir este lançamento?")) return;
+    showLoader(true);
+    await deleteDoc(doc(db,"lancamentos",id));
+    showLoader(false);
+  }
+  async function editarLancamento(id, dados) {
+    showLoader(true);
+    await updateDoc(doc(db,"lancamentos",id), dados);
+    showLoader(false);
+  }
+
+  function showLoader(v) { document.getElementById("loader").style.display = v ? "flex" : "none"; }
+
+  // ── Render principal ─────────────────────────────────────
+  function renderTudo() {
+    renderHeader();
+    renderForm();
+    renderCards();
+    renderGraficos();
+    renderAnalise();
+    renderTabela();
+  }
+
+  // ── HEADER ───────────────────────────────────────────────
+  function renderHeader() {
+    const mes = document.getElementById("sel-mes");
+    const ano = document.getElementById("inp-ano");
+    if (mes && mes.value != mesAtual) mes.value = mesAtual;
+    if (ano && ano.value != anoAtual) ano.value = anoAtual;
+
+    const filt = filtradosMes();
+    const rec  = filt.filter(l=>l.categoria==="Receita").reduce((a,l)=>a+l.valorNum,0);
+    const desp = filt.filter(l=>l.categoria==="Despesa").reduce((a,l)=>a+l.valorNum,0);
+    const sal  = rec - desp;
+
+    document.getElementById("hd-rec").textContent  = fmtR(rec);
+    document.getElementById("hd-desp").textContent = fmtR(desp);
+    const se = document.getElementById("hd-sal");
+    se.textContent = fmtR(sal);
+    se.style.color = sal >= 0 ? "#93c5fd" : "#fbbf24";
+  }
+
+  // ── FORM ─────────────────────────────────────────────────
+  function renderForm() {
+    const cat   = document.getElementById("form-cat").value || "Receita";
+    const tipos = cat === "Receita" ? tiposReceita : tiposDespesa;
+    const sel   = document.getElementById("form-tipo");
+    const cur   = sel.value;
+    sel.innerHTML = tipos.map(t=>`<option value="${t}"${t===cur?" selected":""}>${t}</option>`).join("");
+  }
+
+  function initForm() {
+    document.getElementById("form-cat").addEventListener("change", renderForm);
+    document.getElementById("form-valor").addEventListener("input", function(){
+      this.value = mascaraReais(this.value);
+    });
+    document.getElementById("form-data").value = new Date().toISOString().split("T")[0];
+    document.getElementById("btn-add").addEventListener("click", async () => {
+      const cat   = document.getElementById("form-cat").value;
+      const tipo  = document.getElementById("form-tipo").value;
+      const desc  = document.getElementById("form-desc").value.trim();
+      const valor = document.getElementById("form-valor").value;
+      const data  = document.getElementById("form-data").value;
+      const vNum  = parseMoeda(valor);
+      if (!vNum) { alert("Informe um valor válido."); return; }
+      if (!data) { alert("Informe a data."); return; }
+      await adicionarLancamento({categoria:cat,tipo,descricao:desc,valor,valorNum:vNum,data});
+      document.getElementById("form-valor").value = "";
+      document.getElementById("form-desc").value  = "";
+    });
+  }
+
+  // ── CARDS ────────────────────────────────────────────────
+  function renderCards() {
+    const filt = filtradosMes();
+    const rec  = filt.filter(l=>l.categoria==="Receita").reduce((a,l)=>a+l.valorNum,0);
+    const desp = filt.filter(l=>l.categoria==="Despesa").reduce((a,l)=>a+l.valorNum,0);
+    const sal  = rec-desp;
+    const map  = {};
+    filt.filter(l=>l.categoria==="Despesa").forEach(l=>{map[l.tipo]=(map[l.tipo]||0)+l.valorNum;});
+    const mg   = Object.entries(map).sort((a,b)=>b[1]-a[1])[0];
+
+    document.getElementById("card-rec").textContent  = fmtR(rec);
+    document.getElementById("card-desp").textContent = fmtR(desp);
+    const cs = document.getElementById("card-sal");
+    cs.textContent = fmtR(sal);
+    cs.style.color = sal>=0?"#16a34a":"#d97706";
+    document.getElementById("card-mg-tipo").textContent  = mg ? mg[0] : "—";
+    document.getElementById("card-mg-val").textContent   = mg ? fmtR(mg[1]) : fmtR(0);
+  }
+
+  // ── GRÁFICOS ─────────────────────────────────────────────
+  function renderGraficos() {
+    const filt = filtradosMes();
+    renderPizza(filt);
+    renderBarras(filt);
+  }
+
+  const CORES = ["#1e3a5f","#2e6da4","#3b9ae1","#5bc4f5","#f0a500","#e05c2a","#9ddcf7","#a78bfa","#34d399","#fb7185"];
+
+  function renderPizza(filt) {
+    const map = {};
+    filt.filter(l=>l.categoria==="Despesa").forEach(l=>{map[l.tipo]=(map[l.tipo]||0)+l.valorNum;});
+    const dados = Object.entries(map).map(([n,v])=>({n,v}));
+    const total = dados.reduce((a,d)=>a+d.v,0);
+    const svg   = document.getElementById("svg-pizza");
+    if (!dados.length) { svg.innerHTML = `<text x="110" y="110" text-anchor="middle" fill="#94a3b8" font-size="13">Sem despesas</text>`; return; }
+
+    let startAngle = -Math.PI/2, items = "", legends = "";
+    dados.forEach((d,i) => {
+      const pct = d.v/total;
+      const angle = pct * 2 * Math.PI;
+      const x1=110+90*Math.cos(startAngle), y1=110+90*Math.sin(startAngle);
+      const x2=110+90*Math.cos(startAngle+angle), y2=110+90*Math.sin(startAngle+angle);
+      const large = angle > Math.PI ? 1 : 0;
+      items += `<path d="M110,110 L${x1},${y1} A90,90 0 ${large},1 ${x2},${y2} Z" fill="${CORES[i%CORES.length]}" stroke="#fff" stroke-width="2"/>`;
+      const mx=110+60*Math.cos(startAngle+angle/2), my=110+60*Math.sin(startAngle+angle/2);
+      if (pct > 0.05) items += `<text x="${mx}" y="${my}" text-anchor="middle" fill="#fff" font-size="10" font-weight="600">${(pct*100).toFixed(0)}%</text>`;
+      legends += `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#334155;margin-bottom:4px"><span style="width:10px;height:10px;border-radius:2px;background:${CORES[i%CORES.length]};flex-shrink:0"></span>${d.n}: ${fmtR(d.v)}</div>`;
+      startAngle += angle;
+    });
+    svg.innerHTML = items;
+    document.getElementById("legenda-pizza").innerHTML = legends;
+  }
+
+  function renderBarras(filt) {
+    const map = {};
+    filt.forEach(l=>{
+      const s=semana(l.data);
+      if(!map[s])map[s]={s,r:0,d:0};
+      if(l.categoria==="Receita")map[s].r+=l.valorNum; else map[s].d+=l.valorNum;
+    });
+    const dados = Object.values(map).sort((a,b)=>a.s.localeCompare(b.s));
+    const container = document.getElementById("barras-container");
+    if (!dados.length) { container.innerHTML=`<p style="color:#94a3b8;text-align:center;font-size:13px;padding:2rem 0">Sem lançamentos</p>`; return; }
+    const maxVal = Math.max(...dados.flatMap(d=>[d.r,d.d]),1);
+    const H=160;
+    container.innerHTML = `
+      <div style="display:flex;align-items:flex-end;gap:16px;height:${H}px;padding:0 8px">
+        ${dados.map(d=>`
+          <div style="display:flex;flex-direction:column;align-items:center;gap:2px;flex:1">
+            <div style="display:flex;gap:4px;align-items:flex-end;height:${H-24}px">
+              <div title="Receitas: ${fmtR(d.r)}" style="width:18px;height:${Math.max(2,(d.r/maxVal)*(H-24))}px;background:#16a34a;border-radius:3px 3px 0 0"></div>
+              <div title="Despesas: ${fmtR(d.d)}" style="width:18px;height:${Math.max(2,(d.d/maxVal)*(H-24))}px;background:#dc2626;border-radius:3px 3px 0 0"></div>
+            </div>
+            <span style="font-size:10px;color:#64748b">${d.s}</span>
+          </div>`).join("")}
+      </div>
+      <div style="display:flex;gap:16px;margin-top:8px;justify-content:center">
+        <span style="font-size:12px;color:#16a34a;display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#16a34a;border-radius:2px;display:inline-block"></span>Receitas</span>
+        <span style="font-size:12px;color:#dc2626;display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:#dc2626;border-radius:2px;display:inline-block"></span>Despesas</span>
+      </div>`;
+  }
+
+  // ── ANÁLISE ──────────────────────────────────────────────
+  function renderAnalise() {
+    const filt = filtradosMes();
+    const rec  = filt.filter(l=>l.categoria==="Receita").reduce((a,l)=>a+l.valorNum,0);
+    if (!rec) { document.getElementById("analise-body").innerHTML=`<p style="color:#64748b;font-size:13px">Adicione receitas para ver a análise.</p>`; return; }
+    const map={};
+    filt.filter(l=>l.categoria==="Despesa").forEach(l=>{map[l.tipo]=(map[l.tipo]||0)+l.valorNum;});
+    const itens=Object.entries(map).map(([tipo,valor])=>({tipo,valor,pct:parseFloat(((valor/rec)*100).toFixed(1)),meta:metas[tipo]||null})).sort((a,b)=>b.valor-a.valor);
+    const totD=Object.values(map).reduce((a,b)=>a+b,0);
+    const poup=parseFloat((((rec-totD)/rec)*100).toFixed(1));
+    const alertas=itens.filter(i=>i.meta&&i.valor>i.meta);
+
+    let html="";
+    if(alertas.length){
+      html+=`<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:.75rem 1rem;margin-bottom:1rem">
+        <p style="font-weight:700;color:#dc2626;font-size:13px;margin:0 0 6px">🎯 Meta ultrapassada:</p>
+        ${alertas.map(a=>`<p style="color:#7f1d1d;font-size:13px;margin:2px 0">• <strong>${a.tipo}</strong>: ${fmtR(a.valor)} / meta ${fmtR(a.meta)} — excedeu ${fmtR(a.valor-a.meta)}</p>`).join("")}
+      </div>`;
+    }
+    html+=`<p style="font-weight:600;color:#1e3a5f;font-size:13px;margin-bottom:10px">Gastos por tipo:</p>`;
+    itens.forEach(i=>{
+      const pctMeta=i.meta?Math.min((i.valor/i.meta)*100,100):null;
+      const over=i.meta&&i.valor>i.meta;
+      html+=`<div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px;flex-wrap:wrap;gap:4px">
+          <span style="color:#334155;font-weight:600">${i.tipo}</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="color:#1e3a5f;font-weight:700">${fmtR(i.valor)}</span>
+            ${i.meta?`<span style="color:${over?"#dc2626":"#16a34a"};font-size:11px;font-weight:600">meta:${fmtR(i.meta)} ${over?"⚠️":"✓"}</span>`:""}
+            <span style="color:#64748b;font-size:11px">${i.pct}% renda</span>
+          </div>
+        </div>
+        <div style="background:#e2e8f0;border-radius:99px;height:7px;overflow:hidden">
+          <div style="width:${i.meta?pctMeta:Math.min(i.pct,100)}%;height:100%;border-radius:99px;background:${i.meta?(over?"#dc2626":"#16a34a"):"#1e3a5f"};transition:width .4s"></div>
+        </div>
+      </div>`;
+    });
+    const pc=poup>=20?"#15803d":poup>=0?"#92400e":"#dc2626";
+    const pt=poup>=20?`Parabéns! Você está poupando <strong>${poup}%</strong> da renda — acima dos 20% recomendados.`
+            :poup>=0?`Taxa de poupança: <strong>${poup}%</strong>. O ideal é pelo menos 20% da renda.`
+            :`Despesas superam receitas em <strong>${Math.abs(poup)}%</strong>. Revise os gastos.`;
+    html+=`<div style="background:#fff;border-radius:8px;padding:.75rem 1rem;border:1px solid #e2e8f0;margin-top:4px">
+      <p style="font-weight:700;font-size:13px;color:#1e3a5f;margin:0 0 6px">💡 Parecer financeiro:</p>
+      <p style="color:${pc};font-size:13px;margin:0">${pt}</p>
+    </div>`;
+    document.getElementById("analise-body").innerHTML=html;
+  }
+
+  // ── TABELA ───────────────────────────────────────────────
+  function renderTabela() {
+    const filt = filtradosMes()
+      .filter(l=>(filtroTipo==="Todos"||l.tipo===filtroTipo)&&(filtroCat==="Todas"||l.categoria===filtroCat))
+      .sort((a,b)=>b.data.localeCompare(a.data));
+
+    const tipos = ["Todos",...new Set(filtradosMes().map(l=>l.tipo))];
+    const sf = document.getElementById("sel-filtro-tipo");
+    const cv = sf.value;
+    sf.innerHTML = tipos.map(t=>`<option value="${t}"${t===cv?" selected":""}>${t}</option>`).join("");
+
+    if(!filt.length){
+      document.getElementById("tbody").innerHTML=`<tr><td colspan="6" style="text-align:center;color:#94a3b8;padding:2rem;font-size:13px">Nenhum lançamento encontrado.</td></tr>`;
+      return;
+    }
+    document.getElementById("tbody").innerHTML = filt.map(l=>`
+      <tr style="border-bottom:1px solid #f1f5f9">
+        <td style="padding:8px;color:#64748b;white-space:nowrap">${new Date(l.data+"T00:00:00").toLocaleDateString("pt-BR")}</td>
+        <td style="padding:8px"><span style="background:#f1f5f9;color:#1e3a5f;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">${l.tipo}</span></td>
+        <td style="padding:8px;color:#334155;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${l.descricao||"—"}</td>
+        <td style="padding:8px;font-weight:700;color:${l.categoria==="Receita"?"#16a34a":"#dc2626"};white-space:nowrap">${l.categoria==="Despesa"?"- ":""}${fmtR(l.valorNum)}</td>
+        <td style="padding:8px"><span style="background:${l.categoria==="Receita"?"#f0fdf4":"#fef2f2"};color:${l.categoria==="Receita"?"#16a34a":"#dc2626"};border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">${l.categoria}</span></td>
+        <td style="padding:8px;white-space:nowrap">
+          <button onclick="abrirEdicao('${l.id}')" style="background:none;border:1px solid #e2e8f0;color:#2e6da4;cursor:pointer;font-size:12px;padding:3px 8px;border-radius:4px;margin-right:4px;font-weight:500">✏ Editar</button>
+          <button onclick="confirmarExcluir('${l.id}')" style="background:none;border:1px solid #fecaca;color:#dc2626;cursor:pointer;font-size:12px;padding:3px 8px;border-radius:4px;font-weight:500">✕</button>
+        </td>
+      </tr>`).join("");
+  }
+
+  // ── Filtros mês ──────────────────────────────────────────
+  function filtradosMes() {
+    return lancamentos.filter(l=>{
+      const d=new Date(l.data+"T00:00:00");
+      return d.getMonth()===mesAtual && d.getFullYear()===anoAtual;
+    });
+  }
+
+  // ── Expor funções ao window ──────────────────────────────
+  window.confirmarExcluir = id => excluirLancamento(id);
+
+  window.abrirEdicao = id => {
+    const l = lancamentos.find(x=>x.id===id);
+    if (!l) return;
+    editandoId = id;
+    const tipos = l.categoria==="Receita" ? tiposReceita : tiposDespesa;
+    document.getElementById("ed-cat").value = l.categoria;
+    const st = document.getElementById("ed-tipo");
+    st.innerHTML = tipos.map(t=>`<option value="${t}"${t===l.tipo?" selected":""}>${t}</option>`).join("");
+    document.getElementById("ed-desc").value  = l.descricao||"";
+    document.getElementById("ed-valor").value = mascaraReais(String(Math.round(l.valorNum*100)));
+    document.getElementById("ed-data").value  = l.data;
+    document.getElementById("modal-edicao").style.display="flex";
+  };
+
+  window.fecharModal = id => { document.getElementById(id).style.display="none"; };
+
+  window.mudarCatEdicao = () => {
+    const cat=document.getElementById("ed-cat").value;
+    const tipos=cat==="Receita"?tiposReceita:tiposDespesa;
+    document.getElementById("ed-tipo").innerHTML=tipos.map(t=>`<option>${t}</option>`).join("");
+  };
+
+  window.salvarEdicao = async () => {
+    const cat   = document.getElementById("ed-cat").value;
+    const tipo  = document.getElementById("ed-tipo").value;
+    const desc  = document.getElementById("ed-desc").value.trim();
+    const valor = document.getElementById("ed-valor").value;
+    const data  = document.getElementById("ed-data").value;
+    const vNum  = parseMoeda(valor);
+    if (!vNum) { alert("Informe um valor válido."); return; }
+    await editarLancamento(editandoId,{categoria:cat,tipo,descricao:desc,valor,valorNum:vNum,data});
+    fecharModal("modal-edicao");
+  };
+
+  // ── Modal Tipos ──────────────────────────────────────────
+  window.abrirModalTipos = () => {
+    renderListaTipos();
+    document.getElementById("modal-tipos").style.display="flex";
+  };
+  function renderListaTipos() {
+    document.getElementById("lista-desp").innerHTML=tiposDespesa.map(t=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border-radius:6px;padding:5px 8px;font-size:13px;margin-bottom:4px">
+        <span style="color:#334155">${t}</span>
+        <button onclick="remTipo('despesa','${t}')" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:15px">×</button>
+      </div>`).join("");
+    document.getElementById("lista-rec").innerHTML=tiposReceita.map(t=>`
+      <div style="display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border-radius:6px;padding:5px 8px;font-size:13px;margin-bottom:4px">
+        <span style="color:#334155">${t}</span>
+        <button onclick="remTipo('receita','${t}')" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:15px">×</button>
+      </div>`).join("");
+  }
+  window.addTipo = cat => {
+    const inp2=document.getElementById(cat==="despesa"?"novo-desp":"novo-rec");
+    const t=inp2.value.trim();
+    if(!t) return;
+    if(cat==="despesa" && !tiposDespesa.includes(t)) tiposDespesa.push(t);
+    if(cat==="receita" && !tiposReceita.includes(t)) tiposReceita.push(t);
+    inp2.value="";
+    renderListaTipos();
+    renderForm();
+  };
+  window.remTipo = (cat,t) => {
+    if(cat==="despesa") tiposDespesa=tiposDespesa.filter(x=>x!==t);
+    else tiposReceita=tiposReceita.filter(x=>x!==t);
+    renderListaTipos();
+    renderForm();
+  };
+  window.salvarTipos = async () => {
+    await salvarConfig();
+    fecharModal("modal-tipos");
+    renderTudo();
+  };
+
+  // ── Modal Metas ──────────────────────────────────────────
+  window.abrirModalMetas = () => {
+    document.getElementById("metas-body").innerHTML=tiposDespesa.map(t=>`
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span style="font-size:13px;font-weight:500;color:#334155;min-width:110px;flex:1">${t}</span>
+        <input id="meta-${t}" value="${metas[t]?mascaraReais(String(Math.round(metas[t]*100))):""}"
+          oninput="this.value=window._mask(this.value)"
+          placeholder="R$ 0,00"
+          style="padding:7px 10px;border-radius:6px;border:1px solid #cbd5e1;font-size:13px;width:130px;font-weight:600;text-align:right">
+      </div>`).join("");
+    document.getElementById("modal-metas").style.display="flex";
+  };
+  window._mask = v => mascaraReais(v);
+  window.salvarMetas = async () => {
+    const novas={};
+    tiposDespesa.forEach(t=>{
+      const el=document.getElementById(`meta-${t}`);
+      const v=el?parseMoeda(el.value):0;
+      if(v>0) novas[t]=v;
+    });
+    metas=novas;
+    await salvarConfig();
+    fecharModal("modal-metas");
+    renderTudo();
+  };
+
+  // ── Inicializar eventos ──────────────────────────────────
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("sel-mes").value = mesAtual;
+    document.getElementById("inp-ano").value = anoAtual;
+    document.getElementById("sel-mes").addEventListener("change", e=>{ mesAtual=+e.target.value; renderTudo(); });
+    document.getElementById("inp-ano").addEventListener("change", e=>{ anoAtual=+e.target.value; renderTudo(); });
+    document.getElementById("sel-filtro-tipo").addEventListener("change", e=>{ filtroTipo=e.target.value; renderTabela(); });
+    document.getElementById("sel-filtro-cat").addEventListener("change", e=>{ filtroCat=e.target.value; renderTabela(); });
+    document.getElementById("ed-valor").addEventListener("input", function(){ this.value=mascaraReais(this.value); });
+    document.getElementById("novo-desp").addEventListener("keydown", e=>{ if(e.key==="Enter") window.addTipo("despesa"); });
+    document.getElementById("novo-rec").addEventListener("keydown",  e=>{ if(e.key==="Enter") window.addTipo("receita"); });
+    initForm();
+  });
+</script>
+
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8fafc;color:#1e293b;min-height:100vh}
+  input,select{font-family:inherit}
+  .card{background:#fff;border-radius:12px;border:1px solid #e2e8f0;padding:1.25rem;margin-bottom:1.5rem}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:1.5rem}
+  .grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:1.5rem}
+  .lbl{font-size:11px;font-weight:600;color:#475569;margin-bottom:4px;display:block;text-transform:uppercase;letter-spacing:.05em}
+  .inp{padding:8px 10px;border-radius:6px;border:1px solid #cbd5e1;font-size:13px;background:#fff;color:#1e293b;width:100%}
+  .inp:focus{outline:none;border-color:#2e6da4}
+  .btn-pri{background:#1e3a5f;color:#fff;border:none;border-radius:8px;padding:10px;font-size:13px;font-weight:600;cursor:pointer;width:100%}
+  .btn-pri:hover{background:#2e5490}
+  .toggle{flex:1;padding:8px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;border:1.5px solid #e2e8f0;background:#f8fafc;color:#64748b}
+  .toggle.rec.active{border-color:#16a34a;background:#f0fdf4;color:#16a34a}
+  .toggle.desp.active{border-color:#dc2626;background:#fef2f2;color:#dc2626}
+  .modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center;padding:1rem}
+  .modal-box{background:#fff;border-radius:14px;padding:1.5rem;width:100%;max-width:480px}
+  .modal-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem}
+  .modal-hd h2{font-size:16px;font-weight:700;color:#1e3a5f}
+  .modal-hd button{background:none;border:none;font-size:22px;cursor:pointer;color:#94a3b8;line-height:1}
+  #loader{display:none;position:fixed;inset:0;background:rgba(255,255,255,.7);z-index:2000;align-items:center;justify-content:center;font-size:14px;color:#1e3a5f;font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:6px 8px;color:#64748b;font-weight:600;font-size:11px;text-transform:uppercase;border-bottom:2px solid #e2e8f0}
+  td{padding:8px;border-bottom:1px solid #f1f5f9}
+  @media(max-width:600px){.grid2{grid-template-columns:1fr}.grid4{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+
+<!-- Loader -->
+<div id="loader">⏳ Salvando...</div>
+
+<!-- ── HEADER ─────────────────────────────────────── -->
+<div style="background:#1e3a5f;padding:1.25rem 2rem;border-radius:0 0 16px 16px;margin-bottom:1.5rem">
+  <div style="max-width:900px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem">
+    <div>
+      <h1 style="color:#fff;font-size:20px;font-weight:700;margin-bottom:8px">💰 Controle Financeiro Pessoal</h1>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="sel-mes" class="inp" style="background:#2e5490;border:none;color:#e0ecff;padding:4px 8px;font-size:13px;width:auto">
+          <option value="0">Janeiro</option><option value="1">Fevereiro</option><option value="2">Março</option>
+          <option value="3">Abril</option><option value="4">Maio</option><option value="5">Junho</option>
+          <option value="6">Julho</option><option value="7">Agosto</option><option value="8">Setembro</option>
+          <option value="9">Outubro</option><option value="10">Novembro</option><option value="11">Dezembro</option>
+        </select>
+        <input id="inp-ano" type="number" min="2020" max="2100" class="inp"
+          style="background:#2e5490;border:none;color:#e0ecff;padding:4px 8px;font-size:13px;width:72px"/>
+        <button onclick="abrirModalTipos()" style="background:#2e5490;border:none;color:#e0ecff;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500">⚙ Tipos</button>
+        <button onclick="abrirModalMetas()" style="background:#2e5490;border:none;color:#fbbf24;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:500">🎯 Metas</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap">
+      <div style="text-align:center"><div style="font-size:11px;color:#93c5fd;font-weight:500;margin-bottom:2px">Receitas</div><div id="hd-rec" style="font-size:15px;font-weight:700;color:#4ade80">R$ 0,00</div></div>
+      <div style="text-align:center"><div style="font-size:11px;color:#93c5fd;font-weight:500;margin-bottom:2px">Despesas</div><div id="hd-desp" style="font-size:15px;font-weight:700;color:#f87171">R$ 0,00</div></div>
+      <div style="text-align:center"><div style="font-size:11px;color:#93c5fd;font-weight:500;margin-bottom:2px">Saldo</div><div id="hd-sal" style="font-size:15px;font-weight:700;color:#93c5fd">R$ 0,00</div></div>
+    </div>
+  </div>
+</div>
+
+<div style="max-width:900px;margin:0 auto;padding:0 1rem">
+
+  <!-- ── FORM ────────────────────────────────────────── -->
+  <div class="card">
+    <h2 style="font-size:15px;font-weight:700;color:#1e3a5f;margin-bottom:1rem">Novo lançamento</h2>
+    <div style="display:flex;gap:8px;margin-bottom:1rem">
+      <button class="toggle rec active" id="btn-rec" onclick="setCat('Receita')">Receita</button>
+      <button class="toggle desp" id="btn-desp" onclick="setCat('Despesa')">Despesa</button>
+    </div>
+    <input type="hidden" id="form-cat" value="Receita"/>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:12px">
+      <div><label class="lbl">Tipo</label><select id="form-tipo" class="inp"></select></div>
+      <div><label class="lbl">Data</label><input type="date" id="form-data" class="inp"/></div>
+      <div><label class="lbl">Valor</label><input id="form-valor" class="inp" placeholder="R$ 0,00" style="font-weight:600"/></div>
+      <div><label class="lbl">Descrição</label><input id="form-desc" class="inp" placeholder="Descrição"/></div>
+    </div>
+    <button id="btn-add" class="btn-pri">+ Adicionar lançamento</button>
+  </div>
+
+  <!-- ── CARDS ───────────────────────────────────────── -->
+  <div class="grid4">
+    <div style="background:#f0fdf4;border-radius:12px;padding:1rem;border:1px solid #bbf7d0">
+      <div style="font-size:20px;margin-bottom:6px">📈</div>
+      <div class="lbl" style="color:#64748b">Total de receitas</div>
+      <div id="card-rec" style="font-size:17px;font-weight:700;color:#16a34a">R$ 0,00</div>
+    </div>
+    <div style="background:#fef2f2;border-radius:12px;padding:1rem;border:1px solid #fecaca">
+      <div style="font-size:20px;margin-bottom:6px">📉</div>
+      <div class="lbl" style="color:#64748b">Total de despesas</div>
+      <div id="card-desp" style="font-size:17px;font-weight:700;color:#dc2626">R$ 0,00</div>
+    </div>
+    <div style="background:#eff6ff;border-radius:12px;padding:1rem;border:1px solid #bfdbfe">
+      <div style="font-size:20px;margin-bottom:6px">💰</div>
+      <div class="lbl" style="color:#64748b">Saldo do mês</div>
+      <div id="card-sal" style="font-size:17px;font-weight:700;color:#1e3a5f">R$ 0,00</div>
+    </div>
+    <div style="background:#f5f3ff;border-radius:12px;padding:1rem;border:1px solid #ddd6fe">
+      <div style="font-size:20px;margin-bottom:6px">🏷️</div>
+      <div class="lbl" style="color:#64748b">Maior gasto</div>
+      <div id="card-mg-tipo" style="font-size:12px;color:#7c3aed;font-weight:600;margin-bottom:2px">—</div>
+      <div id="card-mg-val" style="font-size:17px;font-weight:700;color:#7c3aed">R$ 0,00</div>
+    </div>
+  </div>
+
+  <!-- ── GRÁFICOS ─────────────────────────────────────── -->
+  <div class="grid2">
+    <div class="card" style="margin-bottom:0">
+      <h3 style="font-size:14px;font-weight:700;color:#1e3a5f;margin-bottom:1rem">Despesas por categoria</h3>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:16px;justify-content:center">
+        <svg id="svg-pizza" width="220" height="220" viewBox="0 0 220 220"></svg>
+        <div id="legenda-pizza" style="font-size:12px;max-width:160px"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:0">
+      <h3 style="font-size:14px;font-weight:700;color:#1e3a5f;margin-bottom:1rem">Receitas × despesas por semana</h3>
+      <div id="barras-container"></div>
+    </div>
+  </div>
+  <div style="margin-bottom:1.5rem"></div>
+
+  <!-- ── ANÁLISE ──────────────────────────────────────── -->
+  <div class="card" style="background:#f0f9ff;border-color:#bae6fd">
+    <h2 style="font-size:15px;font-weight:700;color:#1e3a5f;margin-bottom:1rem">Painel de análise 🔍</h2>
+    <div id="analise-body"><p style="color:#64748b;font-size:13px">Carregando...</p></div>
+  </div>
+
+  <!-- ── TABELA ───────────────────────────────────────── -->
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:1rem">
+      <h2 style="font-size:15px;font-weight:700;color:#1e3a5f">Lançamentos</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <select id="sel-filtro-tipo" class="inp" style="width:auto;padding:6px 10px;font-size:12px"><option value="Todos">Todos</option></select>
+        <select id="sel-filtro-cat" class="inp" style="width:auto;padding:6px 10px;font-size:12px">
+          <option value="Todas">Todas</option><option value="Receita">Receita</option><option value="Despesa">Despesa</option>
+        </select>
+      </div>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th>Valor</th><th>Categoria</th><th>Ações</th></tr></thead>
+        <tbody id="tbody"><tr><td colspan="6" style="text-align:center;color:#94a3b8;padding:2rem;font-size:13px">Nenhum lançamento ainda.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div><!-- /max-width -->
+
+<!-- ── MODAL EDIÇÃO ─────────────────────────────────── -->
+<div id="modal-edicao" class="modal-bg">
+  <div class="modal-box">
+    <div class="modal-hd"><h2>Editar lançamento</h2><button onclick="fecharModal('modal-edicao')">×</button></div>
+    <div style="display:flex;gap:8px;margin-bottom:1rem">
+      <button class="toggle rec active" id="ed-btn-rec" onclick="setCatEdicao('Receita')">Receita</button>
+      <button class="toggle desp" id="ed-btn-desp" onclick="setCatEdicao('Despesa')">Despesa</button>
+    </div>
+    <input type="hidden" id="ed-cat" value="Receita"/>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div><label class="lbl">Tipo</label><select id="ed-tipo" class="inp"></select></div>
+      <div><label class="lbl">Data</label><input type="date" id="ed-data" class="inp"/></div>
+      <div><label class="lbl">Valor</label><input id="ed-valor" class="inp" placeholder="R$ 0,00" style="font-weight:600"/></div>
+      <div><label class="lbl">Descrição</label><input id="ed-desc" class="inp"/></div>
+    </div>
+    <button class="btn-pri" onclick="salvarEdicao()">Salvar alterações</button>
+  </div>
+</div>
+
+<!-- ── MODAL TIPOS ──────────────────────────────────── -->
+<div id="modal-tipos" class="modal-bg">
+  <div class="modal-box">
+    <div class="modal-hd"><h2>Gerenciar tipos</h2><button onclick="fecharModal('modal-tipos')">×</button></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem">
+      <div>
+        <p style="font-size:12px;font-weight:700;color:#dc2626;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Despesas</p>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <input id="novo-desp" class="inp" placeholder="Novo tipo..." style="padding:6px 8px"/>
+          <button onclick="addTipo('despesa')" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:16px;font-weight:700">+</button>
+        </div>
+        <div id="lista-desp" style="max-height:180px;overflow-y:auto"></div>
+      </div>
+      <div>
+        <p style="font-size:12px;font-weight:700;color:#16a34a;margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Receitas</p>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <input id="novo-rec" class="inp" placeholder="Novo tipo..." style="padding:6px 8px"/>
+          <button onclick="addTipo('receita')" style="background:#16a34a;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:16px;font-weight:700">+</button>
+        </div>
+        <div id="lista-rec" style="max-height:180px;overflow-y:auto"></div>
+      </div>
+    </div>
+    <button class="btn-pri" onclick="salvarTipos()" style="margin-top:1.25rem">Salvar tipos</button>
+  </div>
+</div>
+
+<!-- ── MODAL METAS ──────────────────────────────────── -->
+<div id="modal-metas" class="modal-bg">
+  <div class="modal-box">
+    <div class="modal-hd"><h2>Metas de gastos por tipo</h2><button onclick="fecharModal('modal-metas')">×</button></div>
+    <p style="font-size:13px;color:#64748b;margin-bottom:1rem">Defina um teto mensal por categoria. Um alerta aparece quando ultrapassado.</p>
+    <div id="metas-body" style="max-height:320px;overflow-y:auto;padding-right:4px"></div>
+    <button class="btn-pri" onclick="salvarMetas()" style="margin-top:1.25rem">Salvar metas</button>
+  </div>
+</div>
+
+<script>
+  // Toggle categoria no form principal
+  function setCat(cat) {
+    document.getElementById("form-cat").value = cat;
+    document.getElementById("btn-rec").className  = "toggle rec"  + (cat==="Receita" ?" active":"");
+    document.getElementById("btn-desp").className = "toggle desp" + (cat==="Despesa"?" active":"");
+    // dispara renderForm via módulo (exposta globalmente abaixo)
+    document.getElementById("form-cat").dispatchEvent(new Event("change"));
+  }
+  function setCatEdicao(cat) {
+    document.getElementById("ed-cat").value = cat;
+    document.getElementById("ed-btn-rec").className  = "toggle rec"  + (cat==="Receita" ?" active":"");
+    document.getElementById("ed-btn-desp").className = "toggle desp" + (cat==="Despesa"?" active":"");
+    if (window.mudarCatEdicao) window.mudarCatEdicao();
+  }
+</script>
+</body>
+</html>
